@@ -1,0 +1,1145 @@
+<?php
+defined('BASEPATH') or exit('No direct script access allowed');
+
+class Product extends CI_Controller
+{
+
+    public function __construct()
+    {
+        parent::__construct();
+        $this->load->database();
+        $this->load->library(['ion_auth', 'form_validation', 'upload']);
+        $this->load->helper(['url', 'language', 'file']);
+        $this->load->model(['product_model', 'category_model', 'rating_model']);
+    }
+    public function index()
+    {
+        if ($this->ion_auth->logged_in() && $this->ion_auth->is_partner() && ($this->ion_auth->partner_status() == 1 || $this->ion_auth->partner_status() == 0)) {
+            $this->data['main_page'] = TABLES . 'manage-product';
+            $settings = get_settings('system_settings', true);
+            $this->data['title'] = 'Product Management | ' . $settings['app_name'];
+            $this->data['meta_description'] = 'Product Management |' . $settings['app_name'];
+            $this->data['categories'] = $this->category_model->get_categories();
+            $this->load->view('partner/template', $this->data);
+        } else {
+            redirect('partner/login', 'refresh');
+        }
+    }
+
+    public function create_product()
+    {
+
+        if ($this->ion_auth->logged_in() && $this->ion_auth->is_partner() && ($this->ion_auth->partner_status() == 1 || $this->ion_auth->partner_status() == 0)) {
+            $partner_id = $this->session->userdata('user_id');
+            $this->data['main_page'] = FORMS . 'product';
+            $settings = get_settings('system_settings', true);
+            $this->data['title'] = 'Add Product | ' . $settings['app_name'];
+            $this->data['meta_description'] = 'Add Product | ' . $settings['app_name'];
+            $this->data['taxes'] = fetch_details(null, 'taxes', '*');
+            $this->data['partner_id'] = $partner_id;
+            $this->data['add_on_snaps'] = fetch_details(NULL, 'product_add_ons', '*', '', '', '', '', '', '', "", "", false, "title");
+
+            if (isset($_GET['edit_id']) && !empty($_GET['edit_id'])) {
+                $this->data['title'] = 'Update Product | ' . $settings['app_name'];
+                $this->data['meta_description'] = 'Update Product | ' . $settings['app_name'];
+                $product_details = fetch_details(['id' => $_GET['edit_id']], 'products', '*');
+                $this->data['tags'] = fetch_details(["pt.product_id" => $_GET['edit_id']], "product_tags pt", "pt.*,t.title", null, null, null, "DESC", "", '', "tags t", "t.id=pt.tag_id");
+
+                if (!empty($product_details)) {
+                    $this->data['product_details'] = $product_details;
+                    $this->data['product_variants'] = get_variants_values_by_pid($_GET['edit_id']);
+                    $product_attributes = fetch_details(['product_id' => $_GET['edit_id']], 'product_attributes');
+                    if (!empty($product_attributes) && !empty($product_details)) {
+                        $this->data['product_attributes'] = $product_attributes;
+                    }
+                } else {
+                    redirect('partner/product/create_product', 'refresh');
+                }
+            }
+
+            if (!isset($_GET['edit_id']) && empty($_GET['edit_id'])) {
+                $where = ['attr_val.status' => 1, 'attr.status' => 1];
+            } else {
+                $where = [];
+            }
+            $query = $this->db->select('attr_val.id,attr.name as attr_name ,attr_val.value');
+            if (isset($where) && !empty($where)) {
+                $query->where($where);
+            }
+            $attributes = $query->join('attributes attr', 'attr.id=attr_val.attribute_id')
+                ->get('attribute_values attr_val')->result_array();
+
+            $attributes_refind = array();
+
+            for ($i = 0; $i < count($attributes); $i++) {
+                if (!array_key_exists($attributes[$i]['attr_name'], $attributes_refind)) {
+                    for ($j = 0; $j < count($attributes); $j++) {
+                        if ($attributes[$i]['attr_name'] == $attributes[$j]['attr_name']) {
+                            if (!array_key_exists($attributes[$j]['attr_name'], $attributes_refind)) {
+                                $attributes_refind[$attributes[$j]['attr_name']] = array();
+                            }
+                            $attributes_refind[$attributes[$j]['attr_name']][$j]['id'] = $attributes[$j]['id'];
+                            $attributes_refind[$attributes[$j]['attr_name']][$j]['text'] = $attributes[$j]['value'];
+                            $attributes_refind[$attributes[$j]['attr_name']][$j]['data-values'] = $attributes[$j]['value'];
+                            $attributes_refind[$attributes[$j]['attr_name']] = array_values($attributes_refind[$attributes[$j]['attr_name']]);
+                        }
+                    }
+                }
+            }
+            $this->data['categories'] = $this->category_model->get_categories();
+            $this->data['attributes_refind'] = $attributes_refind;
+            $this->load->view('partner/template', $this->data);
+        } else {
+            redirect('partner/login', 'refresh');
+        }
+    }
+
+    public function get_variants_by_id()
+    {
+        $attr_values = array();
+        $final_variant_ids = array();
+        $variant_ids = json_decode($this->input->get('variant_ids'));
+        $attributes_values = json_decode($this->input->get('attributes_values'));
+        foreach ($attributes_values as $a => $b) {
+            foreach ($b as $key => $value) {
+                array_push($attr_values, $value);
+            }
+        }
+        $res = $this->db->select('id,value')->where_in('id', $attr_values)->get('attribute_values')->result_array();
+
+        for ($i = 0; $i < count($variant_ids); $i++) {
+            for ($j = 0; $j < count($variant_ids[$i]); $j++) {
+                $k = array_search($variant_ids[$i][$j], array_column($res, 'id'));
+                $final_variant_ids[$i][$j] = $res[$k];
+            }
+        }
+        $response['result'] = $final_variant_ids;
+        print_r(json_encode($response));
+    }
+
+    public function fetch_attributes_by_id()
+    {
+        $variants = get_variants_values_by_pid($_GET['edit_id']);
+        $res['attr_values'] = get_attribute_values_by_pid($_GET['edit_id']);
+        $res['pre_selected_variants_names'] = (!empty($variants)) ? $variants[0]['attr_name'] : null;
+        $res['pre_selected_variants_ids'] = $variants;
+        $response['csrfName'] = $this->security->get_csrf_token_name();
+        $response['csrfHash'] = $this->security->get_csrf_hash();
+        $response['result'] = $res;
+        print_r(json_encode($response));
+    }
+
+    public function fetch_attribute_values_by_id($id = NULL)
+    {
+        if (isset($id) && !empty($id)) {
+            $aid = $id;
+        } else {
+            $aid = $_GET['id'];
+        }
+        $variant_ids = get_attribute_values_by_id($aid);
+        print_r(json_encode($variant_ids));
+    }
+
+    public function fetch_variants_values_by_pid()
+    {
+        $res = get_variants_values_by_pid($_GET['edit_id']);
+        $response['result'] = $res;
+        print_r(json_encode($response));
+    }
+
+    public function search_category_wise_products()
+    {
+        if ($this->ion_auth->logged_in() && $this->ion_auth->is_partner() && ($this->ion_auth->partner_status() == 1 || $this->ion_auth->partner_status() == 0)) {
+            $this->db->select('p.*');
+            if ($_GET['cat_id'] == 0) {
+                $data = "";
+            } else {
+                $this->db->where('p.category_id', $_GET['cat_id']);
+                $this->db->or_where('c.parent_id', $_GET['cat_id']);
+            }
+
+            $product_data = json_encode($this->db->order_by('row_order')->join('categories c', 'p.category_id = c.id')->get('products p')->result_array());
+            print_r($product_data);
+        } else {
+            redirect('partner/login', 'refresh');
+        }
+    }
+
+    public function delete_product()
+    {
+        
+        if (defined('ALLOW_MODIFICATION') && ALLOW_MODIFICATION == 0) {
+                $this->response['error'] = true;
+                $this->response['message'] = DEMO_VERSION_MSG;
+                echo json_encode($this->response);
+                return false;
+                exit();
+            }
+        if ($this->ion_auth->logged_in() && $this->ion_auth->is_partner() && ($this->ion_auth->partner_status() == 1 || $this->ion_auth->partner_status() == 0)) {
+            if (delete_details(['product_id' => $_GET['id']], 'product_variants')) {
+
+                delete_details(['id' => $_GET['id']], 'products');
+                delete_details(['product_id' => $_GET['id']], 'product_attributes');
+                $response['error'] = false;
+                $response['message'] = 'Deleted Succesfully';
+            } else {
+                $response['error'] = true;
+                $response['message'] = 'Something Went Wrong';
+            }
+            print_r(json_encode($response));
+        } else {
+            redirect('partner/login', 'refresh');
+        }
+    }
+
+    public function add_product()
+    {
+        if ($this->ion_auth->logged_in() && $this->ion_auth->is_partner() && ($this->ion_auth->partner_status() == 1 || $this->ion_auth->partner_status() == 0)) {
+
+            $this->form_validation->set_rules('pro_input_name', 'Product Name', 'trim|required|xss_clean');
+            $this->form_validation->set_rules('indicator', 'Product Indicator', 'trim|required|xss_clean');
+            $this->form_validation->set_rules('short_description', 'Short Description', 'trim|required|xss_clean');
+            $this->form_validation->set_rules('product_category_id', 'Category Id', 'trim|required|xss_clean', array('required' => 'Category is required'));
+            $this->form_validation->set_rules('pro_input_tax', 'Tax', 'trim|xss_clean');
+            $this->form_validation->set_rules('pro_input_image', 'Image', 'trim|required|xss_clean', array('required' => 'Image is required'));
+            $this->form_validation->set_rules('product_type', 'Product type', 'trim|required|xss_clean');
+            $this->form_validation->set_rules('tags[]', 'tags', 'trim|required|xss_clean');
+            $this->form_validation->set_rules('total_allowed_quantity', 'Total Allowed Quantity', 'trim|xss_clean');
+            $this->form_validation->set_rules('calories', 'calories', 'trim|xss_clean|numeric');
+            $this->form_validation->set_rules('minimum_order_quantity', 'Minimum Order Quantity', 'trim|xss_clean');
+
+            if (isset($_POST['highlights']) && $_POST['highlights'] != '') {
+                $_POST['highlights'] = json_decode($_POST['highlights'], 1);
+                $highlights = array_column($_POST['highlights'], 'value');
+                $_POST['highlights'] = implode(",", $highlights);
+            }
+            if (isset($_POST['product_add_ons']) && $_POST['product_add_ons'] != '') {
+                $_POST['product_add_ons'] = json_decode($_POST['product_add_ons'], 1);
+            }
+
+            if (isset($_POST['is_cancelable']) && $_POST['is_cancelable'] == '1') {
+                $this->form_validation->set_rules('cancelable_till', 'Till which status', 'trim|required|xss_clean');
+            }
+            if (isset($_POST['cod_allowed'])) {
+                $this->form_validation->set_rules('cod_allowed', 'COD allowed', 'trim|xss_clean');
+            }
+            if (isset($_POST['is_prices_inclusive_tax'])) {
+                $this->form_validation->set_rules('is_prices_inclusive_tax', 'Tax included in prices', 'trim|xss_clean');
+            }
+
+            // If product type is simple			
+            if (isset($_POST['product_type']) && $_POST['product_type'] == 'simple_product') {
+
+                $this->form_validation->set_rules('simple_price', 'Price', 'trim|required|numeric|greater_than_equal_to[' . $this->input->post('simple_special_price') . ']|xss_clean');
+                $this->form_validation->set_rules('simple_special_price', 'Special Price', 'trim|numeric|less_than_equal_to[' . $this->input->post('simple_price') . ']|xss_clean');
+
+
+                if (isset($_POST['simple_product_stock_status']) && in_array($_POST['simple_product_stock_status'], array('0', '1'))) {
+                    $this->form_validation->set_rules('product_total_stock', 'Total Stock', 'trim|required|numeric|xss_clean');
+                    $this->form_validation->set_rules('simple_product_stock_status', 'Stock Status', 'trim|required|numeric|xss_clean');
+                }
+            } elseif (isset($_POST['product_type']) && $_POST['product_type'] == 'variable_product') { //If product type is variant	
+                if (isset($_POST['variant_stock_status']) && $_POST['variant_stock_status'] == '0') {
+                    if ($_POST['variant_stock_level_type'] == "product_level") {
+                        $this->form_validation->set_rules('total_stock_variant_type', 'Total Stock', 'trim|required|xss_clean');
+                        $this->form_validation->set_rules('variant_stock_status', 'Stock Status', 'trim|required|xss_clean');
+                        if (isset($_POST['variant_price']) && isset($_POST['variant_special_price'])) {
+                            foreach ($_POST['variant_price'] as $key => $value) {
+                                $this->form_validation->set_rules('variant_price[' . $key . ']', 'Price', 'trim|required|numeric|xss_clean|greater_than_equal_to[' . $this->input->post('variant_special_price[' . $key . ']') . ']');
+                                $this->form_validation->set_rules('variant_special_price[' . $key . ']', 'Special Price', 'trim|numeric|xss_clean|less_than_equal_to[' . $this->input->post('variant_price[' . $key . ']') . ']');
+                            }
+                        } else {
+                            $this->form_validation->set_rules('variant_price', 'Price', 'trim|required|numeric|xss_clean|greater_than_equal_to[' . $this->input->post('variant_special_price') . ']');
+                            $this->form_validation->set_rules('variant_special_price', 'Special Price', 'trim|numeric|xss_clean|less_than_equal_to[' . $this->input->post('variant_price') . ']');
+                        }
+                    }
+                } else {
+                    if (isset($_POST['variant_price']) && isset($_POST['variant_special_price'])) {
+                        foreach ($_POST['variant_price'] as $key => $value) {
+                            $this->form_validation->set_rules('variant_price[' . $key . ']', 'Price', 'trim|required|numeric|xss_clean|greater_than_equal_to[' . $this->input->post('variant_special_price[' . $key . ']') . ']');
+                            $this->form_validation->set_rules('variant_special_price[' . $key . ']', 'Special Price', 'trim|numeric|xss_clean|less_than_equal_to[' . $this->input->post('variant_price[' . $key . ']') . ']');
+                        }
+                    } else {
+                        $this->form_validation->set_rules('variant_price', 'Price', 'trim|required|numeric|xss_clean|greater_than_equal_to[' . $this->input->post('variant_special_price') . ']');
+                        $this->form_validation->set_rules('variant_special_price', 'Special Price', 'trim|numeric|xss_clean|less_than_equal_to[' . $this->input->post('variant_price') . ']');
+                    }
+                }
+            }
+
+            if (!$this->form_validation->run()) {
+                $this->response['error'] = true;
+                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                $this->response['message'] = array(
+                    'pro_input_name' => form_error('pro_input_name'),
+                    'indicator' => form_error('indicator'),
+                    'short_description' => form_error('short_description'),
+                    'product_category_id' => form_error('product_category_id'),
+                    'pro_input_tax' => form_error('pro_input_tax'),
+                    'pro_input_image' => form_error('pro_input_image'),
+                    'product_type' => form_error('product_type'),
+                    'partner_id' => form_error('partner_id'),
+                    'tags' => form_error('tags'),
+                    'total_allowed_quantity' => form_error('total_allowed_quantity'),
+                    'calories' => form_error('calories'),
+                    'minimum_order_quantity' => form_error('minimum_order_quantity'),
+                    'cancelable_till' => form_error('cancelable_till'),
+                    'cod_allowed' => form_error('cod_allowed'),
+                    'is_prices_inclusive_tax' => form_error('is_prices_inclusive_tax'),
+                    'simple_price' => form_error('simple_price'),
+                    'simple_special_price' => form_error('simple_special_price'),
+                    'product_total_stock' => form_error('product_total_stock'),
+                    'simple_product_stock_status' => form_error('simple_product_stock_status'),
+                    'total_stock_variant_type' => form_error('total_stock_variant_type'),
+                    'variant_stock_status' => form_error('variant_stock_status'),
+                    'variant_price[' . $key . ']' => form_error('variant_price[' . $key . ']'),
+                    'variant_special_price[' . $key . ']' => form_error('variant_special_price[' . $key . ']'),
+                    'variant_price' => form_error('variant_price'),
+                    'variant_special_price' => form_error('variant_special_price'),
+                 
+                );
+                print_r(json_encode($this->response));
+            } else {
+                $_POST['partner_id'] = $this->session->userdata('user_id');
+                $this->product_model->add_product($_POST);
+                $this->response['error'] = false;
+                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                $message = (isset($_POST['edit_product_id'])) ? 'Product Updated Successfully' : 'Product Added Successfully';
+                $this->response['message'] = $message;
+                print_r(json_encode($this->response));
+            }
+        } else {
+            redirect('partner/login', 'refresh');
+        }
+    }
+
+    public function get_product_add_ons()
+    {
+        if ($this->ion_auth->logged_in() && $this->ion_auth->is_partner() && ($this->ion_auth->partner_status() == 1 || $this->ion_auth->partner_status() == 0)) {
+            if (isset($_GET['product_id']) && !empty($_GET['product_id'])) {
+                return $this->product_model->get_product_add_ons($this->input->get('product_id', true));
+            }
+        } else {
+            redirect('partner/login', 'refresh');
+        }
+    }
+
+    public function update_add_ons()
+    {
+        if ($this->ion_auth->logged_in() && $this->ion_auth->is_partner() && ($this->ion_auth->partner_status() == 1 || $this->ion_auth->partner_status() == 0)) {
+            $this->form_validation->set_rules('title', 'title', 'trim|required|xss_clean');
+            $this->form_validation->set_rules('description', 'description', 'trim|xss_clean');
+            $this->form_validation->set_rules('price', 'price', 'trim|required|xss_clean');
+            $this->form_validation->set_rules('calories', 'calories', 'trim|xss_clean');
+            $this->form_validation->set_rules('product_id', 'product_id', 'trim|required|xss_clean');
+            $this->form_validation->set_rules('add_on_id', 'add_on_id', 'trim|xss_clean');
+            if (!$this->form_validation->run()) {
+                $this->response['error'] = true;
+                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                $this->response['message'] = array(
+                    'title' => form_error('title'),
+                    'description' => form_error('description'),
+                    'price' => form_error('price'),
+                    'calories' => form_error('calories'),
+                    'product_id' => form_error('product_id'),
+                    'add_on_id' => form_error('add_on_id'),
+                );
+                print_r(json_encode($this->response));
+            } else {
+                $data = array(
+                    'title' => $this->input->post('title', true),
+                    'product_id' => $this->input->post('product_id', true),
+                    'description' => $this->input->post('description', true),
+                    'price' => $this->input->post('price', true),
+                    'calories' => $this->input->post('calories', true),
+                );
+                if (isset($_POST['add_on_id']) && !empty($_POST['add_on_id'])) {
+                    // update add_ons
+                    if (update_details($data, ['id' => $this->input->post('add_on_id', true)], 'product_add_ons') == TRUE) {
+                        $this->response['error'] = false;
+                        $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                        $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                        $this->response['message'] = "Add On details Update Successfuly.";
+                    } else {
+                        $this->response['error'] = true;
+                        $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                        $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                        $this->response['message'] = "Not Updated. Try again later.";
+                    }
+                } else {
+                    if (!is_exist(['title' => $this->input->post('title', true), 'product_id' => $this->input->post('product_id', true)], 'product_add_ons', null)) {
+                        // add new add_ons
+                        if (insert_details($data, 'product_add_ons')) {
+                            $this->response['error'] = false;
+                            $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                            $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                            $this->response['message'] = "Tracking details Insert Successfuly.";
+                        } else {
+                            $this->response['error'] = true;
+                            $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                            $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                            $this->response['message'] = "Not Inserted. Try again later.";
+                        }
+                    } else {
+                        $this->response['error'] = true;
+                        $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                        $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                        $this->response['message'] = "Already have this add on.";
+                    }
+                }
+                print_r(json_encode($this->response));
+            }
+        } else {
+            redirect('partner/login', 'refresh');
+        }
+    }
+
+    public function delete_add_on()
+    {
+        if ($this->ion_auth->logged_in() && $this->ion_auth->is_partner() && ($this->ion_auth->partner_status() == 1 || $this->ion_auth->partner_status() == 0)) {
+            if (delete_details(['id' => $_GET['id']], 'product_add_ons')) {
+                $response['error'] = false;
+                $response['message'] = 'Deleted Succesfully';
+                $response['csrfName'] = $this->security->get_csrf_token_name();
+                $response['csrfHash'] = $this->security->get_csrf_hash();
+            } else {
+                $response['error'] = true;
+                $response['message'] = 'Something Went Wrong';
+                $response['csrfName'] = $this->security->get_csrf_token_name();
+                $response['csrfHash'] = $this->security->get_csrf_hash();
+            }
+            print_r(json_encode($response));
+        } else {
+            redirect('partner/login', 'refresh');
+        }
+    }
+
+
+    public function get_product_data()
+    {
+        if ($this->ion_auth->logged_in() && $this->ion_auth->is_partner() && ($this->ion_auth->partner_status() == 1 || $this->ion_auth->partner_status() == 0)) {
+            $partner_id =  (isset($_GET['partner_id']) && !empty($_GET['partner_id'])) ? $this->input->get('partner_id', true) : $this->session->userdata('user_id');
+            $status =  (isset($_GET['status']) && $_GET['status'] != "") ? $this->input->get('status', true) : NULL;
+            if (isset($_GET['flag']) && !empty($_GET['flag'])) {
+                return $this->product_model->get_product_details($_GET['flag'], $partner_id, $status);
+            }
+            return $this->product_model->get_product_details(null, $partner_id, $status);
+        } else {
+            redirect('partner/login', 'refresh');
+        }
+    }
+
+
+    public function get_rating_list()
+    {
+        if ($this->ion_auth->logged_in() && $this->ion_auth->is_partner() && ($this->ion_auth->partner_status() == 1 || $this->ion_auth->partner_status() == 0)) {
+            return $this->rating_model->get_rating();
+        } else {
+            redirect('partner/login', 'refresh');
+        }
+    }
+
+    public function fetch_attributes()
+    {
+        if ($this->ion_auth->logged_in() && $this->ion_auth->is_partner() && ($this->ion_auth->partner_status() == 1 || $this->ion_auth->partner_status() == 0)) {
+            $attributes = $this->db->select('attr_val.id,attr.name as attr_name ,attr_set.name as attr_set_name,attr_val.value')->join('attributes attr', 'attr.id=attr_val.attribute_id')->join('attribute_set attr_set', 'attr_set.id=attr_val.attribute_set_id')->get('attribute_values attr_val')->result_array();
+            $attributes_refind = array();
+            for ($i = 0; $i < count($attributes); $i++) {
+
+                if (!array_key_exists($attributes[$i]['attr_set_name'], $attributes_refind)) {
+                    $attributes_refind[$attributes[$i]['attr_set_name']] = array();
+
+                    for ($j = 0; $j < count($attributes); $j++) {
+
+                        if ($attributes[$i]['attr_set_name'] == $attributes[$j]['attr_set_name']) {
+
+                            if (!array_key_exists($attributes[$j]['attr_name'], $attributes_refind[$attributes[$i]['attr_set_name']])) {
+
+                                $attributes_refind[$attributes[$i]['attr_set_name']][$attributes[$j]['attr_name']] = array();
+                            }
+                            $attributes_refind[$attributes[$i]['attr_set_name']][$attributes[$j]['attr_name']][$j]['id'] = $attributes[$j]['id'];
+
+                            $attributes_refind[$attributes[$i]['attr_set_name']][$attributes[$j]['attr_name']][$j]['text'] = $attributes[$j]['value'];
+
+                            $attributes_refind[$attributes[$i]['attr_set_name']][$attributes[$j]['attr_name']] = array_values($attributes_refind[$attributes[$i]['attr_set_name']][$attributes[$j]['attr_name']]);
+                        }
+                    }
+                }
+            }
+            print_r(json_encode($attributes_refind));
+        } else {
+            redirect('partner/login', 'refresh');
+        }
+    }
+
+
+    public function view_product()
+    {
+        if ($this->ion_auth->logged_in() && $this->ion_auth->is_partner() && ($this->ion_auth->partner_status() == 1 || $this->ion_auth->partner_status() == 0)) {
+
+            if (isset($_GET['edit_id']) && !empty($_GET['edit_id'])) {
+                $this->data['main_page'] = VIEW . 'products';
+                $settings = get_settings('system_settings', true);
+                $this->data['title'] = 'View Product | ' . $settings['app_name'];
+                $this->data['meta_description'] = 'View Product | ' . $settings['app_name'];
+                $res = fetch_product(NULL, NULL, $this->input->get('edit_id', true));
+                if (!empty($res['product'])) {
+                    $this->data['product_details'] = $res['product'];
+                    $this->data['product_attributes'] = get_attribute_values_by_pid($_GET['edit_id']);
+                    $this->data['product_variants'] = get_variants_values_by_pid($_GET['edit_id'], [0, 1, 7]);
+                    $this->data['product_rating'] = $this->rating_model->fetch_rating((isset($_GET['edit_id'])) ? $_GET['edit_id'] : '');
+                    $this->data['currency'] = $settings['currency'];
+                    $this->data['category_result'] = fetch_details(['status' => '1'], 'categories', 'id,name');
+
+                    $this->load->view('partner/template', $this->data);
+                } else {
+                    redirect('partner/product', 'refresh');
+                }
+            } else {
+                redirect('partner/product', 'refresh');
+            }
+        } else {
+            redirect('partner/login', 'refresh');
+        }
+    }
+
+
+    public function delete_rating()
+    {
+        if ($this->ion_auth->logged_in() && $this->ion_auth->is_partner() && ($this->ion_auth->partner_status() == 1 || $this->ion_auth->partner_status() == 0)) {
+
+            $this->rating_model->delete_rating($_GET['id']);
+
+            $this->response['error'] = false;
+            $this->response['message'] = 'Deleted Succesfully';
+
+            print_r(json_encode($this->response));
+        } else {
+            redirect('partner/login', 'refresh');
+        }
+    }
+
+    public function change_variant_status($id = '', $status = '', $product_id = '')
+    {
+        if ($this->ion_auth->logged_in() && $this->ion_auth->is_partner() && ($this->ion_auth->partner_status() == 1 || $this->ion_auth->partner_status() == 0)) {
+
+            $status = (trim($status) != '' && is_numeric(trim($status))) ? trim($status) : "";
+            $id = (!empty(trim($id)) && is_numeric(trim($id))) ? trim($id) : "";
+
+            if (empty($id) || $status == '') {
+                $this->response['error'] = true;
+                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                $this->response['message'] = "Invalid Status or ID value supplied";
+
+                $this->session->set_flashdata('message', $this->response['message']);
+                $this->session->set_flashdata('message_type', 'error');
+                if (!empty($product_id)) {
+                    $callback_url = base_url("partner/product/view-product?edit_id=$product_id");
+                    header("location:$callback_url");
+                    return false;
+                } else {
+                    print_r(json_encode($this->response));
+                    return false;
+                }
+            }
+            $all_status = [0, 1, 7];
+            if (!in_array($status, $all_status)) {
+                $this->response['error'] = true;
+                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                $this->response['message'] = "Invalid Status value supplied";
+
+                $this->session->set_flashdata('message', $this->response['message']);
+                $this->session->set_flashdata('message_type', 'error');
+                if (!empty($product_id)) {
+                    $callback_url = base_url("partner/product/view-product?edit_id=$product_id");
+                    header("location:$callback_url");
+                    return false;
+                } else {
+                    print_r(json_encode($this->response));
+                    return false;
+                }
+            }
+
+            /* change variant status to the new status */
+            update_details(['status' => $status], ['id' => $id], 'product_variants');
+
+            $this->response['error'] = false;
+            $this->response['message'] = 'Variant status changed successfully';
+            $this->response['csrfName'] = $this->security->get_csrf_token_name();
+            $this->response['csrfHash'] = $this->security->get_csrf_hash();
+
+            $this->session->set_flashdata('message', $this->response['message']);
+            $this->session->set_flashdata('message_type', 'success');
+            if (!empty($product_id)) {
+                $callback_url = base_url("partner/product/view-product?edit_id=$product_id");
+                header("location:$callback_url");
+                return false;
+            } else {
+                print_r(json_encode($this->response));
+                return false;
+            }
+        } else {
+            redirect('partner/login', 'refresh');
+        }
+    }
+
+
+    public function bulk_upload()
+    {
+
+        if ($this->ion_auth->logged_in() && $this->ion_auth->is_partner() && ($this->ion_auth->partner_status() == 1 || $this->ion_auth->partner_status() == 0)) {
+            $this->data['main_page'] = FORMS . 'bulk-upload';
+            $settings = get_settings('system_settings', true);
+            $this->data['title'] = 'Bulk Upload | ' . $settings['app_name'];
+            $this->data['meta_description'] = 'Bulk Upload | ' . $settings['app_name'];
+
+            $this->load->view('partner/template', $this->data);
+        } else {
+            redirect('partner/login', 'refresh');
+        }
+    }
+
+    public function process_bulk_upload()
+    {
+        if ($this->ion_auth->logged_in() && $this->ion_auth->is_partner() && ($this->ion_auth->partner_status() == 1 || $this->ion_auth->partner_status() == 0)) {
+            if (print_msg(!is_modification_allowed('create'), DEMO_VERSION_MSG, 'product', false)) {
+                return false;
+            }
+            $this->form_validation->set_rules('bulk_upload', '', 'xss_clean');
+            $this->form_validation->set_rules('type', 'Type', 'trim|required|xss_clean');
+            if (empty($_FILES['upload_file']['name'])) {
+                $this->form_validation->set_rules('upload_file', 'File', 'trim|required|xss_clean', array('required' => 'Please choose file'));
+            }
+
+            if (!$this->form_validation->run()) {
+                $this->response['error'] = true;
+                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                $this->response['message'] = array(
+                    'bulk_upload' => form_error('bulk_upload'),
+                    'type' => form_error('type'),
+                    'upload_file' => form_error('upload_file'),
+                );
+                print_r(json_encode($this->response));
+            } else {
+                $allowed_mime_type_arr = array('text/x-comma-separated-values', 'text/comma-separated-values', 'application/x-csv', 'text/x-csv', 'text/csv', 'application/csv');
+                $mime = get_mime_by_extension($_FILES['upload_file']['name']);
+                if (!in_array($mime, $allowed_mime_type_arr)) {
+                    $this->response['error'] = true;
+                    $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                    $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                    $this->response['message'] = 'Invalid file format!';
+                    print_r(json_encode($this->response));
+                    return false;
+                }
+                $csv = $_FILES['upload_file']['tmp_name'];
+                $temp = 0;
+                $temp1 = 0;
+                $handle = fopen($csv, "r");
+                $allowed_status = array("pending", "confirmed", "preparing", "out_for_delivery");
+                $video_types = array("youtube", "vimeo");
+                $this->response['message'] = '';
+                $type = $_POST['type'];
+                if ($type == 'upload') {
+                    while (($row = fgetcsv($handle, 10000, ",")) != FALSE) //get row values
+                    {
+                        if ($temp != 0) {
+                            if (empty($row[0])) {
+                                $this->response['error'] = true;
+                                $this->response['message'] = 'Category id is empty at row ' . $temp;
+                                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                print_r(json_encode($this->response));
+                                return false;
+                            }
+
+                            if ($row[1] != 'simple_product' && $row[1] != 'variable_product') {
+                                $this->response['error'] = true;
+                                $this->response['message'] = 'Product type is invalid at row ' . $temp;
+                                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                print_r(json_encode($this->response));
+                                return false;
+                            }
+
+                            if (empty($row[3])) {
+                                $this->response['error'] = true;
+                                $this->response['message'] = 'Name is empty at row ' . $temp;
+                                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                print_r(json_encode($this->response));
+                                return false;
+                            }
+                            if (isset($row[6]) && $row[6] == '') {
+                                $this->response['error'] = true;
+                                $this->response['message'] = 'Calories is empty at row ' . $temp;
+                                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                print_r(json_encode($this->response));
+                                return false;
+                            }
+
+                            if (!empty($row[7]) && $row[7] != 1) {
+                                $this->response['error'] = true;
+                                $this->response['message'] = 'COD allowed is invalid at row ' . $temp;
+                                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                print_r(json_encode($this->response));
+                                return false;
+                            }
+                            if (!empty($row[10]) && $row[10] != 1) {
+                                $this->response['error'] = true;
+                                $this->response['message'] = 'Is Cancelable is invalid at row ' . $temp;
+                                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                print_r(json_encode($this->response));
+                                return false;
+                            }
+
+                            if (!empty($row[10]) && $row[10] == 1 && (empty($row[11]) || !in_array($row[11], $allowed_status))) {
+                                $this->response['error'] = true;
+                                $this->response['message'] = 'Cancelable till is invalid at row ' . $temp;
+                                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                print_r(json_encode($this->response));
+                                return false;
+                            }
+
+                            if (empty($row[10]) && !(empty($row[11]))) {
+                                $this->response['error'] = true;
+                                $this->response['message'] = 'Cancelable till is invalid at row ' . $temp;
+                                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                print_r(json_encode($this->response));
+                                return false;
+                            }
+
+                            if (empty($row[12])) {
+                                $this->response['error'] = true;
+                                $this->response['message'] = 'Image is empty at row ' . $temp;
+                                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                print_r(json_encode($this->response));
+                                return false;
+                            }
+                            if (isset($row[15]) && $row[15] == '') {
+                                $this->response['error'] = true;
+                                $this->response['message'] = 'Tag id is invalid at row ' . $temp;
+                                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                print_r(json_encode($this->response));
+                                return false;
+                            }
+                            $partner_id = $this->ion_auth->get_user_id();
+                            $partner_data = fetch_details(['user_id' => $partner_id], 'partner_data', 'category_ids');
+
+                            // if (!in_array($row[0], explode(',', $partner_data[0]['category_ids']))) {
+                            //     $this->response['error'] = true;
+                            //     $this->response['message'] = 'This Category ID : ' . $row[0] . ' is not assign to partner id:' . $partner_id . ' at row ' . $temp;
+                            //     $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                            //     $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                            //     print_r(json_encode($this->response));
+                            //     return false;
+                            // }
+
+                            $index1 = 17;
+                            $total_variants = 0;
+                            for ($j = 0; $j < 50; $j++) {
+
+                                if (!empty($row[$index1])) {
+                                    $total_variants++;
+                                }
+                                $index1 = $index1 + 5;
+                            }
+                            $variant_index = 16;
+                            for ($k = 0; $k < $total_variants; $k++) {
+                                if ($row[1] == 'variable_product') {
+                                    if (empty($row[$variant_index])) {
+                                        $this->response['error'] = true;
+                                        $this->response['message'] = 'Attribute value ids is empty at row  ' . $temp;
+                                        $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                        $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                        print_r(json_encode($this->response));
+                                        return false;
+                                    }
+                                    $variant_index = $variant_index + 5;
+                                }
+                            }
+                            if ($total_variants == 0) {
+                                $this->response['error'] = true;
+                                $this->response['message'] = 'Variants not found at row ' . $temp;
+                                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                print_r(json_encode($this->response));
+                                return false;
+                            } elseif ($row[1] == 'simple_product' && $total_variants > 1) {
+                                $this->response['error'] = true;
+                                $this->response['message'] = 'You can not add variants more than one for simple prodcuct at row  ' . $temp;
+                                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                print_r(json_encode($this->response));
+                                return false;
+                            }
+                        }
+                        $temp++;
+                    }
+
+                    fclose($handle);
+                    $handle = fopen($csv, "r");
+                    while (($row = fgetcsv($handle, 10000, ",")) != FALSE) //get row vales
+                    {
+                        if ($temp1 != 0) {
+                            $data['category_id'] = $row[0];
+                            $data['type'] = $row[1];
+                            if ($row[2] != '') {
+                                $data['stock_type'] = $row[2];
+                            }
+
+                            $data['name'] = $row[3];
+                            $data['short_description'] = $row[4];
+                            $data['slug'] = create_unique_slug($row[3], 'products');
+                            if ($row[5] != '') {
+                                $data['indicator'] = $row[5];
+                            }
+                            if ($row[6] != '') {
+                                $data['calories'] = $row[6];
+                            }
+                            if ($row[7] != '') {
+                                $data['cod_allowed'] = $row[7];
+                            }
+
+                            if ($row[8] != '') {
+                                $data['minimum_order_quantity'] = $row[8];
+                            }
+
+                            if ($row[9] != '') {
+                                $data['total_allowed_quantity'] = $row[9];
+                            }
+                            if ($row[10] != '') {
+                                $data['is_cancelable'] = $row[10];
+                            }
+                            $data['cancelable_till'] = $row[11];
+                            $data['image'] = $row[12];
+                            if (!empty($row[13])) {
+                                $data['stock'] = $row[13];
+                            }
+                            if ($row[14] != '') {
+                                $data['availability'] = $row[14];
+                            }
+                            $data['partner_id'] = $this->ion_auth->get_user_id();
+                            $this->db->insert('products', $data);
+                            $product_id = $this->db->insert_id();
+
+                            $tag_id = !empty($row[15]) ? $row[15] : '';
+                            $pro_tag_data = [
+                                'product_id' => $product_id,
+                                'tag_id' => $tag_id,
+                            ];
+
+                            $this->db->insert('product_tags', $pro_tag_data);
+
+                            $index1 = 17;
+                            $total_variants = 0;
+                            for ($j = 0; $j < 50; $j++) {
+                                if (!empty($row[$index1])) {
+                                    $total_variants++;
+                                }
+                                $index1 = $index1 + 5;
+                            }
+
+                            $index1 = 16;
+                            $attribute_value_ids = '';
+                            for ($j = 0; $j < $total_variants; $j++) {
+                                if (!empty($row[$index1])) {
+                                    if (!empty($attribute_value_ids)) {
+                                        $attribute_value_ids .= ',' . strval($row[$index1]);
+                                    } else {
+                                        $attribute_value_ids = strval($row[$index1]);
+                                    }
+                                }
+                                $index1 = $index1 + 5;
+                            }
+                            $attribute_value_ids = !empty($attribute_value_ids) ? $attribute_value_ids : '';
+                            $pro_attr_data = [
+
+                                'product_id' => $product_id,
+                                'attribute_value_ids' => $attribute_value_ids,
+
+                            ];
+                            $this->db->insert('product_attributes', $pro_attr_data);
+                            $index = 16;
+                            for ($i = 0; $i < $total_variants; $i++) {
+                                $variant_data[$i]['product_id'] = $product_id;
+                                $variant_data[$i]['attribute_value_ids'] = $row[$index];
+                                $index++;
+                                $variant_data[$i]['price'] = $row[$index];
+                                $index++;
+                                if (isset($row[$index]) && !empty($row[$index])) {
+                                    $variant_data[$i]['special_price'] = $row[$index];
+                                } else {
+                                    $variant_data[$i]['special_price'] = 0;
+                                }
+                                $index++;
+                                if (isset($row[$index]) && !empty($row[$index])) {
+                                    $variant_data[$i]['stock'] = $row[$index];
+                                }
+                                $index++;
+                                if (isset($row[$index]) && $row[$index] != '') {
+                                    $variant_data[$i]['availability'] = $row[$index];
+                                }
+
+                                $index++;
+                                $this->db->insert('product_variants', $variant_data[$i]);
+                            }
+                        }
+                        $temp1++;
+                    }
+                    fclose($handle);
+                    $this->response['error'] = false;
+                    $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                    $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                    $this->response['message'] = 'Products uploaded successfully!';
+                    print_r(json_encode($this->response));
+                    return false;
+                } else {
+                    while (($row = fgetcsv($handle, 10000, ",")) != FALSE) //get row vales
+                    {
+                        if ($temp != 0) {
+                            if (empty($row[0])) {
+                                $this->response['error'] = true;
+                                $this->response['message'] = 'Product id is empty at row ' . $temp;
+                                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                print_r(json_encode($this->response));
+                                return false;
+                            }
+
+                            if (!empty($row[2]) && $row[2] != 'simple_product' && $row[2] != 'variable_product') {
+                                $this->response['error'] = true;
+                                $this->response['message'] = 'Product type is invalid at row ' . $temp;
+                                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                print_r(json_encode($this->response));
+                                return false;
+                            }
+
+
+                            if (!empty($row[8]) && $row[8] != 1) {
+                                $this->response['error'] = true;
+                                $this->response['message'] = 'COD allowed is invalid at row ' . $temp;
+                                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                print_r(json_encode($this->response));
+                                return false;
+                            }
+
+                            if (!empty($row[11]) && $row[11] != 1) {
+                                $this->response['error'] = true;
+                                $this->response['message'] = 'Is Cancelable is invalid at row ' . $temp;
+                                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                print_r(json_encode($this->response));
+                                return false;
+                            }
+
+                            if (!empty($row[11]) && $row[11] == 1 && (empty($row[12]) || !in_array($row[12], $allowed_status))) {
+                                $this->response['error'] = true;
+                                $this->response['message'] = 'Cancelable till is invalid at row ' . $temp;
+                                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                print_r(json_encode($this->response));
+                                return false;
+                            }
+
+                            if (empty($row[11]) && !(empty($row[12]))) {
+                                $this->response['error'] = true;
+                                $this->response['message'] = 'Cancelable till is invalid at row ' . $temp;
+                                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                print_r(json_encode($this->response));
+                                return false;
+                            }
+                            if (isset($row[16]) && $row[16] == '') {
+                                $this->response['error'] = true;
+                                $this->response['message'] = 'Tag id is invalid at row ' . $temp;
+                                $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                print_r(json_encode($this->response));
+                                return false;
+                            }
+                            if (!empty($row[1])) {
+
+                                $partner_id = $this->ion_auth->get_user_id();
+                                $partner_data = fetch_details(['user_id' => $partner_id], 'partner_data', 'category_ids');
+
+                                // if (!in_array($row[1], explode(',', $partner_data[0]['category_ids']))) {
+                                //     $this->response['error'] = true;
+                                //     $this->response['message'] = 'This Category ID : ' . $row[1] . ' is not assign to partner id:' . $partner_id . ' at row ' . $temp;
+                                //     $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                                //     $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                                //     print_r(json_encode($this->response));
+                                //     return false;
+                                // }
+                            }
+                        }
+                        $temp++;
+                    }
+
+                    fclose($handle);
+                    $handle = fopen($csv, "r");
+                    while (($row = fgetcsv($handle, 10000, ",")) != FALSE) //get row values
+                    {
+                        if ($temp1 != 0) {
+                            $product_id = $row[0];
+                            $product = fetch_details(['id' => $product_id], 'products', '*');
+                            if (isset($product[0]) && !empty($product[0])) {
+                                if (!empty($row[1])) {
+                                    $data['category_id'] = $row[1];
+                                } else {
+                                    $data['category_id'] = $product[0]['category_id'];
+                                }
+                                if (!empty($row[2])) {
+                                    $data['type'] = $row[2];
+                                } else {
+                                    $data['type'] = $product[0]['type'];
+                                }
+                                if ($row[3] != '') {
+                                    $data['stock_type'] = $row[3];
+                                } else {
+                                    $data['stock_type'] = $product[0]['stock_type'];
+                                }
+                                if (!empty($row[4])) {
+                                    $data['name'] = $row[5];
+                                    $data['slug'] = create_unique_slug($row[4], 'products');
+                                } else {
+                                    $data['name'] = $product[0]['name'];
+                                }
+                                if (!empty($row[5])) {
+                                    $data['short_description'] = $row[5];
+                                } else {
+                                    $data['short_description'] = $product[0]['short_description'];
+                                }
+                                if ($row[6] != '') {
+                                    $data['indicator'] = $row[6];
+                                } else {
+                                    $data['indicator'] = $product[0]['indicator'];
+                                }
+                                if (!empty($row[7])) {
+                                    $data['calories'] = $row[7];
+                                } else {
+                                    $data['calories'] = $product[0]['calories'];
+                                }
+                                if (!empty($row[8])) {
+                                    $data['cod_allowed'] = $row[8];
+                                } else {
+                                    $data['cod_allowed'] = $product[0]['cod_allowed'];
+                                }
+
+                                if (!empty($row[9])) {
+                                    $data['minimum_order_quantity'] = $row[9];
+                                } else {
+                                    $data['minimum_order_quantity'] = $product[0]['minimum_order_quantity'];
+                                }
+                                if ($row[10] != '') {
+                                    $data['total_allowed_quantity'] = $row[10];
+                                } else {
+                                    $data['total_allowed_quantity'] = $product[0]['total_allowed_quantity'];
+                                }
+                                if ($row[11] != '') {
+                                    $data['is_cancelable'] = $row[11];
+                                } else {
+                                    $data['is_cancelable'] = $product[0]['is_cancelable'];
+                                }
+                                if (!empty($row[12])) {
+                                    $data['cancelable_till'] = $row[12];
+                                } else {
+                                    $data['cancelable_till'] = $product[0]['cancelable_till'];
+                                }
+                                if (!empty($row[13])) {
+                                    $data['image'] = $row[13];
+                                } else {
+                                    $data['image'] = $product[0]['image'];
+                                }
+                                if ($row[14] != '') {
+                                    $data['stock'] = $row[14];
+                                } else {
+                                    $data['stock'] = $product[0]['stock'];
+                                }
+                                if ($row[15] != '') {
+                                    $data['availability'] = $row[15];
+                                } else {
+                                    $data['availability'] = $product[0]['availability'];
+                                }
+                                $tag_id = !empty($row[16]) ? $row[16] : '';
+                                $pro_tag_data = [
+                                    'product_id' => $product_id,
+                                    'tag_id' => $tag_id,
+                                ];
+                                $this->db->where('product_id', $row[0])->update('product_tags', $pro_tag_data);
+                                $this->db->where('id', $row[0])->update('products', $data);
+                            }
+                            $index1 = 18;
+                            $total_variants = 0;
+                            for ($j = 0; $j < 50; $j++) {
+                                if (!empty($row[$index1])) {
+                                    $total_variants++;
+                                }
+                                $index1 = $index1 + 5;
+                            }
+                            $index = 17;
+                            for ($i = 0; $i < $total_variants; $i++) {
+                                $variant_id = $row[$index];
+                                $variant = fetch_details(['id' => $row[$index]], 'product_variants',  '*');
+                                if (isset($variant[0]) && !empty($variant[0])) {
+                                    $variant_data[$i]['product_id'] = $variant[0]['product_id'];
+                                    $index++;
+                                    if (isset($row[$index]) && !empty($row[$index])) {
+                                        $variant_data[$i]['price'] = $row[$index];
+                                    } else {
+                                        $variant_data[$i]['price'] = $variant[0]['price'];
+                                    }
+                                    $index++;
+                                    if (isset($row[$index]) && $row[$index] != '') {
+                                        $variant_data[$i]['special_price'] = $row[$index];
+                                    } else {
+                                        $variant_data[$i]['special_price'] = $variant[0]['special_price'];
+                                    }
+                                    $index++;
+                                    if (isset($row[$index]) && $row[$index] != '') {
+                                        $variant_data[$i]['stock'] = $row[$index];
+                                    } else {
+                                        $variant_data[$i]['stock'] = $variant[0]['stock'];
+                                    }
+
+                                    $index++;
+                                    if (isset($row[$index]) && $row[$index] != '') {
+                                        $variant_data[$i]['availability'] = $row[$index];
+                                    } else {
+                                        $variant_data[$i]['availability'] = $variant[0]['availability'];
+                                    }
+
+                                    $index++;
+                                    $this->db->where('id', $variant_id)->update('product_variants', $variant_data[$i]);
+                                }
+                            }
+                        }
+                        $temp1++;
+                    }
+                    fclose($handle);
+                    $this->response['error'] = false;
+                    $this->response['csrfName'] = $this->security->get_csrf_token_name();
+                    $this->response['csrfHash'] = $this->security->get_csrf_hash();
+                    $this->response['message'] = 'Products updated successfully!';
+                    print_r(json_encode($this->response));
+                    return false;
+                }
+            }
+        } else {
+            redirect('admin/login', 'refresh');
+        }
+    }
+}
